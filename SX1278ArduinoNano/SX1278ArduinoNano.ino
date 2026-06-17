@@ -29,7 +29,7 @@ uint8_t currentHour = 0;
 uint8_t currentMinute = 0;
 unsigned long lastMinuteUpdateTick = 0;
 
-
+String signal = "";
 
 void setup() {
   // Initialize Serial Monitor
@@ -41,7 +41,7 @@ void setup() {
 
   // Override the default SPI pins for the LoRa library
   LoRa.setPins(LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
-  
+
   // Initialize SX1278 at 433 MHz (change to 868E6 or 915E6 if using different module)
   if (!LoRa.begin(433E6)) {
     Serial.println("Starting LoRa failed! Check your wiring.");
@@ -75,7 +75,14 @@ void loop() {
       incomingMsg += (char)LoRa.read();
     }
 
+    long rssi = LoRa.packetRssi();
+    float snr = LoRa.packetSnr();
+    long ferr = LoRa.packetFrequencyError();
+
+    signal = "RSSI=" + String(rssi) + "," + " SNR=" + String(snr) + "," + " FERR=" + String(ferr);
+
     incomingMsg.trim();
+    Serial.print(signal);
 
     Serial.print("Received: ");
     Serial.println(incomingMsg);
@@ -304,8 +311,9 @@ int getNextScheduleIndex() {
 }
 
 void sendStatusToSender() {
+  
   // If motor is running, do not block radio transmissions long
-  String response = "STATUS|ACTIVE_SCHEDS:" + String(totalSchedules) + "|";
+  String response = String(motorIsRunning) + "|" + signal + "|SCH:" + String(totalSchedules) + "|";
 
   // 1. Append all active schedules currently loaded in memory
   if (totalSchedules == 0) {
