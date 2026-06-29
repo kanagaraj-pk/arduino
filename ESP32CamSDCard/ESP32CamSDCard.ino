@@ -4,10 +4,13 @@
 #include "Arduino.h"
 #include "FS.h"                // SD Card ESP32
 #include "SD_MMC.h"            // SD Card ESP32
-#include "soc/soc.h"           // Disable brownour problems
-#include "soc/rtc_cntl_reg.h"  // Disable brownour problems
-#include "driver/rtc_io.h"
-#include <EEPROM.h>            // read and write from flash memory
+#include "img_converters.h" // Required for the raw-to-jpeg software converter
+#include "time.h" // Built-in library to manage internal clock structures
+
+
+const char* ntpServer = "pool.ntp.org";
+const long  gmtOffset_sec = 19800; // IST is UTC +5:30 (5.5 * 3600 seconds)
+const int   daylightOffset_sec = 0; // No daylight savings in India
 
 #include <ArduinoJson.h>
 
@@ -16,7 +19,7 @@
 // ===========================
 #include "board_config.h"
 
-int pictureNumber = 0;
+
 
 
 // ===========================
@@ -26,7 +29,8 @@ const char *ssid = "Vi";
 const char *password = "9448894884";
 
 
-#define MAX_IMAGES 1000
+#define MAX_IMAGES 10000
+int pictureNumber = 0;
 
 
 void setup() {
@@ -62,14 +66,14 @@ void setup() {
   config.pixel_format = PIXFORMAT_YUV422; 
 
   //800*600
-  //config.xclk_freq_hz = 20000000;
-  //config.frame_size = FRAMESIZE_SVGA; 
-  //config.fb_count = 1;
+  config.xclk_freq_hz = 20000000;
+  config.frame_size = FRAMESIZE_SVGA; 
+  config.fb_count = 1;
 
   //320*240
-  config.xclk_freq_hz = 16000000;  
-  config.frame_size = FRAMESIZE_QVGA;
-  config.fb_count = 2;
+  //config.xclk_freq_hz = 16000000;  
+  //config.frame_size = FRAMESIZE_QVGA;
+  // config.fb_count = 2;
 
   
   // Init Camera
@@ -83,11 +87,11 @@ void setup() {
   sensor_t * s = esp_camera_sensor_get();
   if (s != NULL) {
     // 1. Enable Automatic Exposure Control (AEC) so it actively drops brightness
-    s->set_aec_value(s, 0); 
-    s->set_exposure_ctrl(s, 1); // 1 = Enable Auto Exposure
+    s->set_aec_value(s, 5); 
+    s->set_exposure_ctrl(s, 0); // 1 = Enable Auto Exposure
 
     // 2. Enable Automatic Gain Control (AGC) but drop the ceiling to prevent grain/whiteness
-    s->set_gain_ctrl(s, 1);     // 1 = Enable Auto Gain
+    s->set_gain_ctrl(s, 0);     // 1 = Enable Auto Gain
     s->set_agc_gain(s, 0);         // Reset manual gain overrides
     s->set_gainceiling(s, GAINCEILING_2X); // Lower limit (indoor defaults use 8X or 16X)
 
@@ -96,8 +100,14 @@ void setup() {
     s->set_wb_mode(s, 1);          // 1 = Sunny / Outdoor mode (0=Auto, 2=Cloudy, 3=Office)
 
     // 4. Adjust basic light levels
-    s->set_brightness(s, -1);      // Drop general brightness bias slightly (-2 to 2 scale)
-    s->set_contrast(s, 1);         // Boost contrast to preserve details under direct sun
+    s->set_brightness(s, -2);      // Drop general brightness bias slightly (-2 to 2 scale)
+    s->set_contrast(s, 2); 
+    
+    s->set_saturation(s, 1);
+    s->set_whitebal(s, 1);
+    s->set_wb_mode(s, 1);
+    s->set_hmirror(s, 0);
+    s->set_vflip(s, 0);
   }
 
   WiFi.begin(ssid, password);
@@ -107,14 +117,36 @@ void setup() {
         delay(1000);
         Serial.println("Wifi Connecting");
       }
-  Serial.println("Wifi Connected");
-  
+
+     if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nConnected! Syncing Local Time via NTP...");
+    
+    // Configures internal ESP32 RTC using global internet time servers
+    configTime(gmtOffset_sec, daylightOffset_sec, ntpServer);
+    
+    // Wait briefly for time validation structural sync
+    struct tm timeinfo;
+    if (getLocalTime(&timeinfo)) {
+      Serial.printf("Current synchronized time: %02d:%02d:%02d\n", timeinfo.tm_hour, timeinfo.tm_min, timeinfo.tm_sec);
+    }
+
+    WiFi.disconnect(true);
+    }
+      Serial.println("Starting SD Card");
+      if(!SD_MMC.begin("/sdcard", true)){ 
+      Serial.println("SD Card Mount Failed!");
+      return;
+      }
+      pinMode(4, OUTPUT);
+      digitalWrite(4, LOW);
 }
 
 void loop() {  
+   
+
   if(WiFi.status() == WL_CONNECTED) {          
           // 1. Capture the frame (Make sure pixel_format is set to PIXFORMAT_YUV422 in config)
-          camera_fb_t * fb = esp_camera_fb_get();
+         camera_fb_t * fb = esp_camera_fb_get();
           if (!fb) {
               Serial.println("Camera capture failed");
               return;
@@ -173,7 +205,65 @@ void loop() {
   }
   else
   {
-    Serial.println("Wifi not Connected");
-  }
+
+    Serial.println("WiFi Offline! Compressing frame to JPEG for SD storage...");
+
+    camera_fb_t * fb = esp_camera_fb_get();
+          if (!fb) {
+              Serial.println("Camera capture failed");
+              delay(2000); 
+              return;
+          }
+    uint8_t * jpeg_buf = NULL;
+    size_t jpeg_len = 0;
+
+    // 1. Convert the raw YUV422 frame into JPEG in memory (Quality: 10 is high, 63 is lowest)
+    bool converted = fmt2jpg(fb->buf, fb->len, fb->width, fb->height, PIXFORMAT_YUV422, 12, &jpeg_buf, &jpeg_len);
+     if (converted && jpeg_buf != NULL) {
+
+    File counterFile = SD_MMC.open("/counter.txt", FILE_READ);
+    if (counterFile) {
+        pictureNumber = counterFile.parseInt();
+        counterFile.close();
+    }
+    pictureNumber++;
+
+    if (pictureNumber >= MAX_IMAGES)
+    pictureNumber = 0;
+
+      // 2. Generate an incremental filename with a .jpg extension
+      String path = "/picture_" + String(pictureNumber++) + ".jpg";
+      
+       
+
+      File file = SD_MMC.open(path, FILE_WRITE);
+      if (file) {
+        // 3. Write the compressed JPEG bytes to disk
+          file.write(jpeg_buf, jpeg_len); 
+          file.close();
+          Serial.printf("Saved JPEG (%d bytes) instead of RAW (%d bytes) to %s\n", jpeg_len, fb->len, path.c_str());
+
+          counterFile = SD_MMC.open("/counter.txt", FILE_WRITE);
+          if (counterFile) {
+              counterFile.seek(0);
+              counterFile.print(pictureNumber);
+              counterFile.close();
+          }
+          digitalWrite(4, LOW);
+      } else {
+        Serial.println("SD Card write failed!");
+      }
+
+      // 4. CRITICAL: Always free the temporary JPEG buffer memory allocated by fmt2jpg
+      free(jpeg_buf); 
+        } else {
+          Serial.println("Software JPEG compression failed!");
+        } 
+
+          // Always return the main camera buffer back to prevent a secondary leak
+        esp_camera_fb_return(fb); 
+        delay(60000);  
+  } 
+
 
 }
