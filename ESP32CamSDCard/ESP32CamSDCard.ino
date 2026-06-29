@@ -9,6 +9,8 @@
 #include "driver/rtc_io.h"
 #include <EEPROM.h>            // read and write from flash memory
 
+#include <ArduinoJson.h>
+
 // ===========================
 // Select camera model in board_config.h
 // ===========================
@@ -52,19 +54,50 @@ void setup() {
   config.pin_sscb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 10000000;
-  config.pixel_format = PIXFORMAT_YUV422; 
-  
-  config.frame_size = FRAMESIZE_SVGA;
-  config.fb_count = 1;
   config.fb_location = CAMERA_FB_IN_PSRAM;
-  config.grab_mode = CAMERA_GRAB_WHEN_EMPTY;
+  config.grab_mode = CAMERA_GRAB_LATEST;
+
+
+
+  config.pixel_format = PIXFORMAT_YUV422; 
+
+  //800*600
+  //config.xclk_freq_hz = 20000000;
+  //config.frame_size = FRAMESIZE_SVGA; 
+  //config.fb_count = 1;
+
+  //320*240
+  config.xclk_freq_hz = 16000000;  
+  config.frame_size = FRAMESIZE_QVGA;
+  config.fb_count = 2;
+
   
   // Init Camera
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
     Serial.printf("Camera init failed with error 0x%x", err);
     return;
+  }
+
+  // --- ADD THIS BLOCK FOR SUNLIGHT CORRECTION ---
+  sensor_t * s = esp_camera_sensor_get();
+  if (s != NULL) {
+    // 1. Enable Automatic Exposure Control (AEC) so it actively drops brightness
+    s->set_aec_value(s, 0); 
+    s->set_exposure_ctrl(s, 1); // 1 = Enable Auto Exposure
+
+    // 2. Enable Automatic Gain Control (AGC) but drop the ceiling to prevent grain/whiteness
+    s->set_gain_ctrl(s, 1);     // 1 = Enable Auto Gain
+    s->set_agc_gain(s, 0);         // Reset manual gain overrides
+    s->set_gainceiling(s, GAINCEILING_2X); // Lower limit (indoor defaults use 8X or 16X)
+
+    // 3. Enable Auto White Balance (AWB) and switch to "Sunny" or "Outdoor" mode
+    s->set_whitebal(s, 1);         // 1 = Enable Auto White Balance
+    s->set_wb_mode(s, 1);          // 1 = Sunny / Outdoor mode (0=Auto, 2=Cloudy, 3=Office)
+
+    // 4. Adjust basic light levels
+    s->set_brightness(s, -1);      // Drop general brightness bias slightly (-2 to 2 scale)
+    s->set_contrast(s, 1);         // Boost contrast to preserve details under direct sun
   }
 
   WiFi.begin(ssid, password);
@@ -74,21 +107,18 @@ void setup() {
         delay(1000);
         Serial.println("Wifi Connecting");
       }
+  Serial.println("Wifi Connected");
   
 }
 
-void loop() {
-  
-  if(WiFi.status() == WL_CONNECTED) {
-    Serial.println("Wifi Connected");
-          
+void loop() {  
+  if(WiFi.status() == WL_CONNECTED) {          
           // 1. Capture the frame (Make sure pixel_format is set to PIXFORMAT_YUV422 in config)
           camera_fb_t * fb = esp_camera_fb_get();
           if (!fb) {
               Serial.println("Camera capture failed");
               return;
           }
-
           HTTPClient http;
           http.begin("https://api.tekfocusminds.com/motor/upload");
           
@@ -103,15 +133,47 @@ void loop() {
           
           Serial.printf("HTTP = %d\n", code);
           if (code == 200) {
-              Serial.println("Upload OK");
-          }
+                        // --- DYNAMIC CONTROL DECODING ---
+                String responseBody = http.getString();
+                
+                // Parse the JSON string configuration map returned from FastAPI
+                JsonDocument doc; 
+                DeserializationError error = deserializeJson(doc, responseBody);
+                
+                if (!error) {
+                  sensor_t * s = esp_camera_sensor_get();
+                  if (s != NULL) {
+                    // Read settings out of JSON and write directly to camera registers
+                    s->set_brightness(s, doc["brightness"]);    
+                    s->set_contrast(s, doc["contrast"]);        
+                    s->set_exposure_ctrl(s, doc["exposure_ctrl"]); 
+                    s->set_aec_value(s, doc["aec_value"]);
+                    
+                    s->set_gain_ctrl(s, doc["gain_control"]); 
+                    s->set_agc_gain(s, doc["agc_gain"]);
+                    // Map integer to internal enum indices (0=2X, 1=4X, 2=8X, etc)
+                    s->set_gainceiling(s, (gainceiling_t)doc["gainceiling"].as<int>());
+
+                    // --- NEWLY ADDED GC2145 COMPATIBLE SETTINGS ---
+                    s->set_saturation(s, doc["saturation"]); // Fix color washed-out issues (-2 to 2)
+                    s->set_whitebal(s, doc["whitebal"]);     // Auto white balance (0 or 1)
+                    s->set_wb_mode(s, doc["wb_mode"]);       // 0=Auto, 1=Sunny, 2=Cloudy
+                    s->set_hmirror(s, doc["hmirror"]);       // Horizontal flip (0 or 1)
+                    s->set_vflip(s, doc["vflip"]);           // Vertical flip (0 or 1)                    
+                  }
+                }
+            }          
           else {
               Serial.println(http.getString());
-          }
+              }
           
           http.end(); 
           esp_camera_fb_return(fb);
-          delay(5000); // Wait 5 seconds before next shot
+          delay(100); // Wait 5 seconds before next shot
+  }
+  else
+  {
+    Serial.println("Wifi not Connected");
   }
 
 }
