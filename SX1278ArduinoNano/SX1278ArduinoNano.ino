@@ -31,30 +31,37 @@ unsigned long lastMinuteUpdateTick = 0;
 
 String signal = "";
 
+bool loraReady = false;
+unsigned long lastLoraRetry = 0;
+
+
+
 void setup() {
   // Initialize Serial Monitor
   Serial.begin(9600);
   pinMode(MOTOR_PIN, OUTPUT);
-  digitalWrite(MOTOR_PIN, LOW); // Motor 
+  digitalWrite(MOTOR_PIN, LOW); // Motor  
 
   Serial.println("LoRa Transmitter Setup...");
 
+   loraReady = initLoRa();
+
   // Override the default SPI pins for the LoRa library
-  LoRa.setPins(LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
+  //LoRa.setPins(LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
 
   // Initialize SX1278 at 433 MHz (change to 868E6 or 915E6 if using different module)
-  if (!LoRa.begin(433E6)) {
-    Serial.println("Starting LoRa failed! Check your wiring.");
-    while (1); // Halt execution
-  }
+  //if (!LoRa.begin(433E6)) {
+   // Serial.println("Starting LoRa failed! Check your wiring.");
+   //while (1); // Halt execution
+ // }
   // Apply settings after successful initialization
-  LoRa.setSpreadingFactor(12);     // Highest sensitivity
-  LoRa.setSignalBandwidth(125E3);  // 125 kHz
-  LoRa.setCodingRate4(8);          // Maximum error correction
-  LoRa.enableCrc();
-  LoRa.setTxPower(20);
-  LoRa.receive(); 
-  Serial.println("LoRa SX1278 Initialized Successfully!");
+  //LoRa.setSpreadingFactor(12);     // Highest sensitivity
+  //LoRa.setSignalBandwidth(125E3);  // 125 kHz
+ // LoRa.setCodingRate4(8);          // Maximum error correction
+ // LoRa.enableCrc();
+ // LoRa.setTxPower(20);
+ // LoRa.receive(); 
+  //Serial.println("LoRa SX1278 Initialized Successfully!");
 
 
   // Load operating config from non-volatile memory
@@ -64,6 +71,15 @@ void setup() {
 
 void loop() {
 
+     if (!loraReady) {
+        if (millis() - lastLoraRetry > 10000UL) {   // retry every 10 seconds
+            lastLoraRetry = millis();
+            Serial.println("Retrying LoRa...");
+           loraReady = initLoRa();
+        }
+        return;   // don't use LoRa until initialized
+     }
+  //Serial.println("LoRa Ready. Checking packets...");
   // Check for incoming LoRa packet
   int packetSize = LoRa.parsePacket();
 
@@ -96,6 +112,31 @@ void loop() {
   manageMotorState();
 }
 
+
+bool initLoRa() {
+
+    LoRa.setPins(LORA_SS_PIN, LORA_RST_PIN, LORA_DIO0_PIN);
+    //Sometimes the radio itself gets stuck during a brownout. Before calling LoRa.begin(), reset it:
+    pinMode(LORA_RST_PIN, OUTPUT);
+    digitalWrite(LORA_RST_PIN, LOW);
+    delay(20);
+    digitalWrite(LORA_RST_PIN, HIGH);
+    delay(20);
+
+    if (!LoRa.begin(433E6)) {
+        Serial.println("LoRa init failed");
+        return false;
+    }
+
+    LoRa.setSpreadingFactor(12);
+    LoRa.setSignalBandwidth(125E3);
+    LoRa.setCodingRate4(8);
+    LoRa.enableCrc();
+    LoRa.setTxPower(20);
+    LoRa.receive();
+    //Serial.println("LoRa Ready");
+    return true; 
+}
 
 void processIncomingMessage(String msg) {
       // 1. Clean up formatting issues
