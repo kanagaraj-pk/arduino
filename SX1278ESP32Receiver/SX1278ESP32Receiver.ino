@@ -42,7 +42,12 @@ String GateStr = "";
 bool loraReady = false;
 unsigned long lastLoraRetry = 0;
 
-
+//Gate_ Open Close
+const unsigned long Gate_TX_INTERVAL = 5000;    // 5 seconds
+const unsigned long Gate_TX_DURATION = 60000;   // 1 minute
+unsigned long Gate_startTime = 0;
+unsigned long Gate_lastTxTime = 0;
+bool Gate_txActive = false;
 
 void setup() {
   // Initialize Serial Monitor
@@ -121,6 +126,8 @@ void loop() {
 
   // 3. Monitor schedules and manage active relays
   manageMotorState();
+
+  gateopenclose();
 }
 
 
@@ -484,12 +491,46 @@ void manageMotorState() {
         motorIsRunning = true;
         motorEndTime = millis() + ((unsigned long)activeSchedules[i].runMinutes * 60000);
         digitalWrite(MOTOR_PIN, HIGH);
-        Serial.print("Schedule Match! Starting motor for ");
+        
+        Gate_txActive = true;
+        Gate_startTime = millis();
+        Gate_lastTxTime = Gate_startTime - Gate_TX_INTERVAL; // Transmit immediately
+
+        Serial.print("Schedule Match! Starting Gate Packet and Motor for ");
         Serial.print(activeSchedules[i].runMinutes);
         Serial.println(" minutes.");
         break; 
       }
     }
   }
+}
+
+void gateopenclose(){
+  unsigned long now = millis();
+
+  if (Gate_txActive) {
+     Serial.println("LoRa Gate packet start");
+    // Stop transmitting after 1 minute
+    if (now - Gate_startTime >= Gate_TX_DURATION) {
+      Gate_txActive = false;
+      Serial.println("LoRa transmission stopped after 1 minute");
+      return;
+    }
+
+    // Transmit every 5 seconds
+    if (now - Gate_lastTxTime >= Gate_TX_INTERVAL) {
+      Gate_lastTxTime = now;
+
+      // Replace this with your existing LoRa transmission code
+      LoRa.beginPacket();
+      LoRa.print(GateStr);
+      LoRa.endPacket();
+
+      LoRa.receive(); 
+
+      Serial.println("LoRa Gate packet End");
+    }
+  }
+
 }
 
